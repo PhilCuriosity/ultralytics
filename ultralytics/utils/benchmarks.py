@@ -216,8 +216,8 @@ def benchmark(
                 )
             if export_format == "axera":
                 assert not isinstance(model, YOLOWorld), "YOLOWorldv2 AXERA exports not supported"
-                assert LINUX and not ARM64, "AXERA benchmark requires the axnn simulator on Linux x86_64"
-                cpu = True  # the axnn simulator executes the compiled model on the host CPU
+                assert LINUX and not ARM64, "AXERA export requires the axnn simulator on Linux x86_64"
+                cpu = True  # export needs no device; inference is blocked below
             if "cpu" in str(device):
                 assert cpu, "inference not supported on CPU"
             if "cuda" in str(device):
@@ -244,6 +244,7 @@ def benchmark(
 
             # Predict
             assert export_format != "edgetpu", "inference not supported"
+            assert export_format != "axera", "AXERA inference only supported on AXERA devices; use ax_run_model"
             assert export_format != "coreml" or platform.system() == "Darwin", "inference requires macOS>=10.13"
             assert export_format != "coreai" or MACOS, "inference requires macOS"
             assert export_format != "axelera", "inference only supported on Axelera hardware"

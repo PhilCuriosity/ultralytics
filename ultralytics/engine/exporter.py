@@ -519,7 +519,7 @@ INT8_FORMATS = frozenset(
         "axera",
     }
 )
-W8A16_FORMATS = frozenset({"coreml", "litert", "qnn", "axera"})  # INT8 + 16-bit act (FP16; INT16 on LiteRT/AXERA)
+W8A16_FORMATS = frozenset({"coreml", "litert", "qnn", "axera"})  # INT8 weights + 16-bit activations (FP16; INT16 on LiteRT/AXERA)
 W8A32_FORMATS = frozenset({"litert"})  # INT8 weights + FP32 activations (dynamic/weight-only INT8, no calibration)
 FP32_UNSUPPORTED_FORMATS = frozenset(
     {"edgetpu", "imx", "rknn", "axelera", "deepx", "qnn", "hailo", "ascend", "xilinx", "nxp", "axera"}
@@ -757,8 +757,9 @@ class Exporter:
         if fmt == "axera":
             from ultralytics.utils.export.axera import AXERA_CHIPS
 
-            assert model.task in {"detect", "segment", "semantic", "depth", "classify", "pose", "obb"}, (
-                "AXERA export requires a supported task."
+            axera_tasks = {"detect", "segment", "semantic", "depth", "classify", "pose", "obb"}
+            assert model.task in axera_tasks, (
+                f"AXERA export supports {sorted(axera_tasks)} tasks; got task='{model.task}'."
             )
             assert self.args.nms is None, "AXERA export currently supports nms=None only."
             assert not self.args.dynamic, "AXERA export does not support dynamic shapes."
@@ -769,7 +770,7 @@ class Exporter:
                 f"Invalid AXERA target '{self.args.name}'. Valid targets are {sorted(AXERA_CHIPS)}."
             )
             assert not (self.args.name == "AX650" and self.args.quantize == 16), (
-                "AX650 supports INT8 only; use name=AX8860 for 16-bit float."
+                "AX650 exports INT8 or 'w8a16'; use name=AX8860 for 16-bit float."
             )
             if self.args.quantize is None:
                 self.args.quantize = 16 if self.args.name == "AX8860" else 8  # per-chip default precision

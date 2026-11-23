@@ -96,24 +96,16 @@ def _build_config(
             }
         ]
     elif quantize == "w8a16":
-        # INT8 weights + INT16 activations.
+        # INT8 weights + INT16 activations. Weights default to S8, so only the activation type is set.
         layer_configs = [
             {
                 "start_tensor_names": ["DEFAULT"],
                 "end_tensor_names": ["DEFAULT"],
                 "data_type": "U16",
-                "weight_data_type": "S8",
             }
         ]
-    else:  # 8: INT8 weights (S8) + U8 activations
-        layer_configs = [
-            {
-                "start_tensor_names": ["DEFAULT"],
-                "end_tensor_names": ["DEFAULT"],
-                "data_type": "U8",
-                "weight_data_type": "S8",
-            }
-        ]
+    else:  # 8: leave layer precision to the Pulsar2 default, i.e. U8 activations and S8 weights
+        layer_configs = []
     return {
         "input": str(onnx_file),
         "output_dir": str(build_dir),
