@@ -51,7 +51,7 @@ class AxeraBackend(BaseBackend):
             from axnn.simulator.sim import InferenceSession, RunMode
             from axnn.yamain.command.build import TargetPlatform
 
-            target = str(metadata.get("axera", {}).get("target", "AX650"))
+            target = str(metadata.get("axera", {}).get("target", "AX650")).upper()
             try:
                 members = TargetPlatform.__members__
                 target_platform = TargetPlatform[target] if target in members else TargetPlatform.from_backend(target)
@@ -66,6 +66,13 @@ class AxeraBackend(BaseBackend):
         if len(inputs) != 1:
             raise RuntimeError(f"AXERA backend expects one input, but the runtime exposes {len(inputs)}.")
         self.input_name = inputs[0]
+
+        self.tail = None
+        artifact_dir = w if w.is_dir() else w.parent
+        if (artifact_dir / "tail.onnx").is_file():  # INT8 stops at the head convs; the decode runs here in FP32
+            import onnxruntime
+
+            self.tail = onnxruntime.InferenceSession(str(artifact_dir / "tail.onnx"), providers=["CPUExecutionProvider"])
         self.apply_metadata(metadata)
         self._warmup()
 
@@ -93,7 +100,7 @@ class AxeraBackend(BaseBackend):
             im (torch.Tensor): Input tensor in BHWC format, RGB and normalized to [0, 1].
 
         Returns:
-            (list[np.ndarray]): Raw model outputs.
+            (list[np.ndarray]): Raw model outputs, with the FP32 ``tail.onnx`` decode applied when present.
         """
         inp = self.metadata.get("axera", {}).get("inputs", [{}])[0]
         mean = np.asarray(inp.get("mean", [0.0, 0.0, 0.0]), dtype=np.float32)
@@ -101,4 +108,12 @@ class AxeraBackend(BaseBackend):
         im = im.detach().cpu().numpy() * std + mean  # undo the predictor normalization back to [0, 1] pixels
         im = (im * 255).round().clip(0, 255).astype(np.uint8)
         im = np.ascontiguousarray(im[..., ::-1])  # RGB to BGR for the Pulsar2 source format
-        return self._infer(im)
+        outputs = self._infer(im)
+        if self.tail is None:
+            return outputs
+        named = dict(zip(self.output_names, outputs))
+        feeds = {
+            tensor.name: np.asarray(named.get(tensor.name, outputs[i]), dtype=np.float32)
+            for i, tensor in enumerate(self.tail.get_inputs())
+        }
+        return list(self.tail.run(None, feeds))

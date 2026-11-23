@@ -12,7 +12,6 @@ from typing import Any
 from ultralytics.utils import LOGGER, YAML
 
 AXERA_CHIPS = frozenset({"AX650", "AX8860"})
-AXERA_PRECISIONS = {"AX650": "w8a8", "AX8860": "w16a16"}  # AX650 runs INT8, AX8860 runs 16-bit float
 CALIBRATION_MAX_SIZE = 64  # cap staged images so a full COCO split cannot blow up the artifact and build time
 
 
@@ -43,42 +42,38 @@ def _stage_calibration(images: list[Path], calib_dir: Path, calib_zip: Path) -> 
     return len(images)
 
 
-_PASSIVE_OPS = frozenset({"Reshape", "Transpose", "Squeeze", "Unsqueeze", "Flatten", "Cast", "Identity"})
+def _graph_output_names(onnx_file: Path) -> list[str]:
+    """Return the ONNX graph output names, in graph order."""
+    import onnx
+
+    return [output.name for output in onnx.load(str(onnx_file), load_external_data=False).graph.output]
 
 
-def _graph_outputs(onnx_file: Path) -> tuple[list[str], list[str]]:
-    """Return the ONNX graph output names and the layers Pulsar2 must keep in FP32.
+def _split_head(onnx_file: Path, output_dir: Path, head: str) -> Path | None:
+    """Split the graph at the head convolutions so the decode runs in FP32 ``tail.onnx``.
 
-    The primary YOLO output is a ``Concat`` that merges tensors with incompatible ranges: box coordinates (~0-640) with
-    class scores, keypoint confidences or OBB angles (~0-1). A single U8 scale flattens the small-range tensors to zero,
-    so every op that produces a branch of that concat stays FP32. The walk descends through pass-through ops and nested
-    concats but stops at the first real compute op, which keeps the set small and avoids nodes that Pulsar2 fuses.
+    INT8 activations cannot hold both box pixels (~0-640) and class scores (~0-1) in one scale, so the quantized body
+    stops at the per-level head convs and ``tail.onnx`` keeps the box decode for the host. Mirrors the RKNN INT8 split.
     """
     import onnx
 
     graph = onnx.load(str(onnx_file), load_external_data=False).graph
-    producers = {output: node for node in graph.node for output in node.output}
-    outputs = [output.name for output in graph.output]
-    if not outputs:
-        return outputs, []
-
-    primary = producers.get(outputs[0])
-    if primary is None or primary.op_type != "Concat":
-        # Heads without a mixed-range concat (classification) still need FP32 softmaxes to keep probability resolution.
-        return outputs, [node.name for node in graph.node if node.op_type == "Softmax"]
-
-    layers, stack, seen = {primary.name}, [primary], {primary.name}
-    while stack:
-        node = stack.pop()
-        for tensor in node.input:
-            upstream = producers.get(tensor)
-            if upstream is None or upstream.name in seen:
-                continue
-            seen.add(upstream.name)
-            layers.add(upstream.name)
-            if upstream.op_type in _PASSIVE_OPS or upstream.op_type == "Concat":
-                stack.append(upstream)
-    return outputs, sorted(layers)
+    ops = {"Reshape", "Concat"}  # head convs feed only these per-level ops
+    ends = {x for n in graph.node if n.op_type in ops for x in n.input}
+    ends -= {x for n in graph.node if n.op_type not in ops for x in n.input}
+    cuts = [
+        n.output[0]
+        for n in graph.node
+        if n.op_type == "Conv" and head in n.name and "/dfl/" not in n.name and n.output[0] in ends
+    ]
+    if not cuts:
+        return None
+    outputs = [x.name for x in graph.output]
+    cuts += [x for x in outputs if x != "output0"]  # e.g. segment prototypes pass straight through the tail
+    onnx.utils.extract_model(str(onnx_file), str(output_dir / "tail.onnx"), cuts, outputs)
+    body = output_dir / "body.onnx"
+    onnx.utils.extract_model(str(onnx_file), str(body), [x.name for x in graph.input], cuts)
+    return body
 
 
 def _build_config(
@@ -87,25 +82,37 @@ def _build_config(
     calib_zip: Path,
     calibration_size: int,
     target: str,
-    precision: str,
-    output_layers: list[str],
+    quantize: int | str,
 ) -> dict:
-    """Build the Pulsar2 configuration for the precision the target chip supports."""
-    if precision == "w16a16":
-        # AX8860 runs 16-bit float. axnn 8.0 rejects `data_type: FP16` (FP16 is absent from the quantizer dtype map and
-        # only BF16 is accepted), so the 16-bit float build uses BF16 for both weights and activations.
+    """Build the Pulsar2 configuration for the requested ``quantize`` precision."""
+    if quantize == 16:
+        # 16-bit float: axnn 8.0 rejects `data_type: FP16` (absent from the quantizer dtype map and only BF16 is
+        # accepted), so 16-bit float uses BF16 for both weights and activations.
         layer_configs = [
             {
                 "start_tensor_names": ["DEFAULT"],
                 "end_tensor_names": ["DEFAULT"],
                 "data_type": "BF16",
-                "weight_data_type": "BF16",
             }
         ]
-    else:  # AX650: INT8 weights and activations, with the mixed-range head branches kept in FP32
+    elif quantize == "w8a16":
+        # INT8 weights + INT16 activations.
         layer_configs = [
-            {"start_tensor_names": ["DEFAULT"], "end_tensor_names": ["DEFAULT"], "data_type": "U8"},
-            *({"layer_name": name, "data_type": "FP32", "output_data_type": "FP32"} for name in output_layers),
+            {
+                "start_tensor_names": ["DEFAULT"],
+                "end_tensor_names": ["DEFAULT"],
+                "data_type": "U16",
+                "weight_data_type": "S8",
+            }
+        ]
+    else:  # 8: INT8 weights (S8) + U8 activations
+        layer_configs = [
+            {
+                "start_tensor_names": ["DEFAULT"],
+                "end_tensor_names": ["DEFAULT"],
+                "data_type": "U8",
+                "weight_data_type": "S8",
+            }
         ]
     return {
         "input": str(onnx_file),
@@ -132,7 +139,7 @@ def _build_config(
                 "tensor_name": "DEFAULT",
                 "tensor_format": "RGB",
                 "tensor_layout": "NCHW",
-                "src_format": "BGR",
+                "src_format": "RGB",
                 "src_layout": "NHWC",
                 "src_dtype": "U8",
                 "mean": [0, 0, 0],
@@ -188,6 +195,8 @@ def onnx2axera(
     dataset: Any,
     metadata: dict | None = None,
     target: str = "AX650",
+    quantize: int | str = 8,
+    head: str | None = None,
     prefix: str = "",
 ) -> str:
     """Compile an ONNX model to an AXERA ``.axmodel`` directory with Pulsar2.
@@ -197,7 +206,12 @@ def onnx2axera(
         output_dir (str | Path): Directory for the final ``_axera_model`` artifact.
         dataset (Any): Calibration dataloader from ``Exporter.get_int8_calibration_dataloader``.
         metadata (dict | None): Ultralytics metadata saved beside the compiled model.
-        target (str): Pulsar2 ``target_hardware`` name: ``"AX650"`` (W8A8) or ``"AX8860"`` (W16A16/FP16).
+        target (str): Public chip name: ``"AX650"`` (INT8) or ``"AX8860"`` (16-bit float).
+        quantize (int | str): ``8`` (INT8), ``16`` (16-bit float) or ``"w8a16"`` (INT8 weights + INT16 activations).
+            ``Exporter`` fills in the per-chip default before calling this function.
+        head (str | None): ONNX node-name scope of the model head, e.g. ``"/model.23/"``. INT8 detection builds stop
+            at the head convs and keep the box decode in ``tail.onnx`` for the host; other tasks and 16-bit builds keep
+            the whole graph (``Exporter`` only passes ``head`` for detection).
         prefix (str): Prefix for log messages.
 
     Returns:
@@ -208,6 +222,8 @@ def onnx2axera(
     target = str(target).upper()
     if target not in AXERA_CHIPS:
         raise ValueError(f"Invalid AXERA target '{target}'. Valid targets are {sorted(AXERA_CHIPS)}.")
+    if quantize not in {8, 16, "w8a16"}:
+        raise ValueError(f"AXERA export requires quantize in {{8, 16, 'w8a16'}}; got {quantize!r}.")
 
     shutil.rmtree(output_dir, ignore_errors=True)
     output_dir.mkdir(parents=True)
@@ -228,10 +244,11 @@ def onnx2axera(
     calib_zip = build_dir / "calib.zip"
     calibration_size = _stage_calibration(images, calib_dir, calib_zip)
 
-    output_names, output_layers = _graph_outputs(onnx_file)
-    precision = AXERA_PRECISIONS[target]
+    body = _split_head(onnx_file, build_dir, head) if (quantize == 8 and head) else None
+    compiled_onnx = body or onnx_file
+    output_names = _graph_output_names(compiled_onnx)
 
-    config = _build_config(onnx_file, build_dir, calib_zip, calibration_size, target, precision, output_layers)
+    config = _build_config(compiled_onnx, build_dir, calib_zip, calibration_size, target, quantize)
     config_file = output_dir / "config.json"
     config_file.write_text(json.dumps(config, indent=2) + "\n")
 
@@ -247,7 +264,7 @@ def onnx2axera(
             "target": target,
             "inputs": [{"name": "images", "dtype": "uint8", "layout": "NHWC", "range": [0, 255]}],
             "outputs": [{"name": n, "dtype": "float32", "order": i} for i, n in enumerate(output_names)],
-            "precision": precision,
+            "quantize": quantize,
             "calibration": {"format": "Image", "size": calibration_size},
             "build_context": context.get("code", ""),
         }

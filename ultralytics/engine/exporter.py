@@ -495,7 +495,7 @@ EXPORT_ENVS = {
 
 # Export precision support per format. Unset/32 requests are FP32 except for formats listed in FP32_UNSUPPORTED_FORMATS.
 FP16_FORMATS = frozenset(
-    {"torchscript", "onnx", "openvino", "engine", "coreml", "coreai", "mnn", "ncnn", "rknn", "ascend"}
+    {"torchscript", "onnx", "openvino", "engine", "coreml", "coreai", "mnn", "ncnn", "rknn", "ascend", "axera"}
 )
 INT8_FORMATS = frozenset(
     {
@@ -519,7 +519,7 @@ INT8_FORMATS = frozenset(
         "axera",
     }
 )
-W8A16_FORMATS = frozenset({"coreml", "litert", "qnn"})  # INT8 weights + 16-bit activations (FP16; INT16 on LiteRT)
+W8A16_FORMATS = frozenset({"coreml", "litert", "qnn", "axera"})  # INT8 + 16-bit act (FP16; INT16 on LiteRT/AXERA)
 W8A32_FORMATS = frozenset({"litert"})  # INT8 weights + FP32 activations (dynamic/weight-only INT8, no calibration)
 FP32_UNSUPPORTED_FORMATS = frozenset(
     {"edgetpu", "imx", "rknn", "axelera", "deepx", "qnn", "hailo", "ascend", "xilinx", "nxp", "axera"}
@@ -768,6 +768,11 @@ class Exporter:
             assert self.args.name in AXERA_CHIPS, (
                 f"Invalid AXERA target '{self.args.name}'. Valid targets are {sorted(AXERA_CHIPS)}."
             )
+            assert not (self.args.name == "AX650" and self.args.quantize == 16), (
+                "AX650 supports INT8 only; use name=AX8860 for 16-bit float."
+            )
+            if self.args.quantize is None:
+                self.args.quantize = 16 if self.args.name == "AX8860" else 8  # per-chip default precision
         if fmt == "hailo":
             assert LINUX and not ARM64, "Hailo export is only supported on Linux x86_64."
             blocks = {str(x[2]) for x in model.yaml.get("backbone", []) + model.yaml.get("head", [])}
@@ -1728,6 +1733,16 @@ class Exporter:
             dataset=self.get_int8_calibration_dataloader(prefix),
             metadata=self.metadata,
             target=self.args.name,
+            quantize=self.args.quantize,
+            # INT8 box detection stops the NPU graph at the head convs and decodes boxes in FP32 inside tail.onnx.
+            # Other tasks keep the full graph until their own split is validated.
+            head=(
+                f"/model.{len(self.model.model) - 1}/"
+                if self.model.task == "detect"
+                and hasattr(self.model, "model")
+                and self.metadata["head"] != "RTDETRDecoder"
+                else None
+            ),
             prefix=prefix,
         )
 
