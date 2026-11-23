@@ -1727,6 +1727,10 @@ class Exporter:
         from ultralytics.utils.export.axera import onnx2axera
 
         self.im = self.im[:1]  # AXERA export is static batch=1
+        fraction = self.args.fraction
+        if not isinstance(fraction, list) and fraction in (None, 1.0):
+            self.args.fraction = 64  # calibrate on 64 images by default, not the whole split
+            self.metadata["args"]["fraction"] = self.args.fraction
         output_dir = self.file.parent / f"{self.file.stem}_axera_model"
         return onnx2axera(
             onnx_file=self.export_onnx(),

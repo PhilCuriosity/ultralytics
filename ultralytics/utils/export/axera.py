@@ -12,7 +12,6 @@ from typing import Any
 from ultralytics.utils import LOGGER, YAML
 
 AXERA_CHIPS = frozenset({"AX650", "AX8860"})
-CALIBRATION_MAX_SIZE = 64  # cap staged images so a full COCO split cannot blow up the artifact and build time
 
 
 def _calibration_images(dataset: Any) -> list[Path]:
@@ -226,12 +225,6 @@ def onnx2axera(
     build_dir = output_dir
 
     images = _calibration_images(dataset)
-    if len(images) > CALIBRATION_MAX_SIZE:
-        LOGGER.info(
-            f"{prefix} using the first {CALIBRATION_MAX_SIZE} of {len(images)} calibration images "
-            f"(set fraction=<n> on export to choose a different subset)"
-        )
-        images = images[:CALIBRATION_MAX_SIZE]
     calib_dir = build_dir / "calib"
     calib_zip = build_dir / "calib.zip"
     calibration_size = _stage_calibration(images, calib_dir, calib_zip)
