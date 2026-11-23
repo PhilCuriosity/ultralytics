@@ -317,6 +317,15 @@ def export_formats():
             ["quantize", "data", "fraction", "opset", "simplify"],
             "base",
         ],
+        [
+            "AXERA",
+            "axera",
+            "_axera_model",
+            False,
+            False,
+            ["batch", "name", "quantize", "opset", "simplify", "data", "fraction"],
+            "base",
+        ],
     ]
     return dict(zip(["Format", "Argument", "Suffix", "CPU", "GPU", "Arguments", "Env"], zip(*x)))
 
@@ -507,12 +516,13 @@ INT8_FORMATS = frozenset(
         "xilinx",
         "executorch",
         "stedgeai",
+        "axera",
     }
 )
 W8A16_FORMATS = frozenset({"coreml", "litert", "qnn"})  # INT8 weights + 16-bit activations (FP16; INT16 on LiteRT)
 W8A32_FORMATS = frozenset({"litert"})  # INT8 weights + FP32 activations (dynamic/weight-only INT8, no calibration)
 FP32_UNSUPPORTED_FORMATS = frozenset(
-    {"edgetpu", "imx", "rknn", "axelera", "deepx", "qnn", "hailo", "ascend", "xilinx", "nxp"}
+    {"edgetpu", "imx", "rknn", "axelera", "deepx", "qnn", "hailo", "ascend", "xilinx", "nxp", "axera"}
 )
 # (label, supporting formats) per quantize precision, used to list valid options in errors. 32/None (FP32) is universal except FP32_UNSUPPORTED_FORMATS.
 QUANTIZE_PRECISIONS = (
@@ -742,8 +752,22 @@ class Exporter:
         }:
             LOGGER.warning(f"{fmt} export requires INT8 quantization, enabling it.")
             self.args.quantize = "w8a16" if fmt == "qnn" else 8
-        if fmt in {"axelera", "hailo", "xilinx", "nxp"} and not self.args.data:
+        if fmt in {"axelera", "hailo", "xilinx", "nxp", "axera"} and not self.args.data:
             self.args.data = TASK2CALIBRATIONDATA.get(model.task)
+        if fmt == "axera":
+            from ultralytics.utils.export.axera import AXERA_CHIPS
+
+            assert model.task in {"detect", "segment", "semantic", "depth", "classify", "pose", "obb"}, (
+                "AXERA export requires a supported task."
+            )
+            assert self.args.nms is None, "AXERA export currently supports nms=None only."
+            assert not self.args.dynamic, "AXERA export does not support dynamic shapes."
+            assert self.args.batch == 1, "AXERA export requires batch=1."
+            self.args.opset = self.args.opset or 13
+            self.args.name = str(self.args.name or "AX650").upper()
+            assert self.args.name in AXERA_CHIPS, (
+                f"Invalid AXERA target '{self.args.name}'. Valid targets are {sorted(AXERA_CHIPS)}."
+            )
         if fmt == "hailo":
             assert LINUX and not ARM64, "Hailo export is only supported on Linux x86_64."
             blocks = {str(x[2]) for x in model.yaml.get("backbone", []) + model.yaml.get("head", [])}
@@ -1690,6 +1714,22 @@ class Exporter:
                 if hasattr(self.model, "model") and self.metadata["head"] != "RTDETRDecoder"
                 else None,
             )
+
+    @try_export
+    def export_axera(self, prefix=colorstr("AXERA:")):  # noqa: B008
+        """Export YOLO model to AXERA format through Pulsar2."""
+        from ultralytics.utils.export.axera import onnx2axera
+
+        self.im = self.im[:1]  # AXERA export is static batch=1
+        output_dir = self.file.parent / f"{self.file.stem}_axera_model"
+        return onnx2axera(
+            onnx_file=self.export_onnx(),
+            output_dir=output_dir,
+            dataset=self.get_int8_calibration_dataloader(prefix),
+            metadata=self.metadata,
+            target=self.args.name,
+            prefix=prefix,
+        )
 
     @try_export
     def export_ascend(self, prefix=colorstr("Ascend:")):  # noqa: B008

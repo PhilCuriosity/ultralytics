@@ -34,6 +34,7 @@ Huawei Ascend           | `ascend`                  | yolo26n_ascend_model/
 AMD Xilinx              | `xilinx`                  | yolo26n_xilinx_model/
 NXP                     | `nxp`                     | yolo26n_nxp.tflite
 ST Edge AI              | `stedgeai`                | yolo26n_stedgeai.onnx
+AXERA                   | `axera`                   | yolo26n_axera_model/
 """
 
 from __future__ import annotations
@@ -213,6 +214,10 @@ def benchmark(
                 assert not (MACOS and is_github_action_running()), (
                     "LiteRT not benchmarked on macOS CI (ai-edge-litert/TF abseil mutex deadlock)"
                 )
+            if export_format == "axera":
+                assert not isinstance(model, YOLOWorld), "YOLOWorldv2 AXERA exports not supported"
+                assert LINUX and not ARM64, "AXERA benchmark requires the axnn simulator on Linux x86_64"
+                cpu = True  # the axnn simulator executes the compiled model on the host CPU
             if "cpu" in str(device):
                 assert cpu, "inference not supported on CPU"
             if "cuda" in str(device):
