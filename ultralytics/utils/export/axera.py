@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import zipfile
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -215,6 +216,11 @@ def onnx2axera(
         raise ValueError(f"Invalid AXERA target '{target}'. Valid targets are {sorted(AXERA_CHIPS)}.")
     if quantize not in {8, 16, "w8a16"}:
         raise ValueError(f"AXERA export requires quantize in {{8, 16, 'w8a16'}}; got {quantize!r}.")
+    if find_spec("axnn") is None:
+        raise ModuleNotFoundError(
+            "AXERA export requires the axnn toolchain (Pulsar2 ships inside axnn); install the latest release "
+            "from https://huggingface.co/AXERA-TECH/Pulsar2/tree/main before exporting."
+        )
 
     shutil.rmtree(output_dir, ignore_errors=True)
     output_dir.mkdir(parents=True)

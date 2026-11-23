@@ -107,7 +107,7 @@ class AxeraBackend(BaseBackend):
         std = np.asarray(inp.get("std", [1.0, 1.0, 1.0]), dtype=np.float32)
         im = im.detach().cpu().numpy() * std + mean  # undo the predictor normalization back to [0, 1] pixels
         im = (im * 255).round().clip(0, 255).astype(np.uint8)
-        im = np.ascontiguousarray(im[..., ::-1])  # RGB to BGR for the Pulsar2 source format
+        im = np.ascontiguousarray(im[..., ::-1])  # convert RGB to BGR
         outputs = self._infer(im)
         if self.tail is None:
             return outputs

@@ -764,6 +764,7 @@ class Exporter:
             assert self.args.nms is None, "AXERA export currently supports nms=None only."
             assert not self.args.dynamic, "AXERA export does not support dynamic shapes."
             assert self.args.batch == 1, "AXERA export requires batch=1."
+            assert LINUX, "AXERA export requires Linux."
             self.args.opset = self.args.opset or 13
             self.args.name = str(self.args.name or "AX650").upper()
             assert self.args.name in AXERA_CHIPS, (
