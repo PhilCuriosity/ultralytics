@@ -548,7 +548,8 @@ def test_export_axera(isolated_model):
     assert (out / "compiled.axmodel").is_file(), f"AXERA export failed, no compiled.axmodel found in: {file}"
     axera = YAML.load(out / "metadata.yaml")["axera"]
     assert axera["target"] == "AX650" and axera["quantize"] == 8, f"unexpected AXERA metadata: {axera}"
-    # INT8 detection stops at the head convolutions and decodes boxes in FP32 on the host
+    assert axera["npu_mode"] == "NPU3", f"unexpected AXERA npu_mode: {axera}"
+    # Quantized detection stops at the head convolutions and decodes boxes in FP32 on the host
     assert (out / "tail.onnx").is_file(), f"AXERA INT8 export is missing tail.onnx: {file}"
     shutil.rmtree(file, ignore_errors=True)
 
