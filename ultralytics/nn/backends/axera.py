@@ -16,7 +16,7 @@ class AxeraBackend(BaseBackend):
     """AXERA inference backend for compiled ``.axmodel`` artifacts.
 
     Runs on the AXERA NPU through ``axengine`` when the device runtime is installed, and falls back to the
-    ``axnn.simulator`` x86 reference execution otherwise. Both paths share the same artifact contract: uint8 BGR
+    ``axnn.simulator`` x86 reference execution otherwise. Both paths share the same artifact contract: uint8 RGB
     NHWC input and float32 outputs in metadata order.
     """
 
@@ -107,7 +107,7 @@ class AxeraBackend(BaseBackend):
         std = np.asarray(inp.get("std", [1.0, 1.0, 1.0]), dtype=np.float32)
         im = im.detach().cpu().numpy() * std + mean  # undo the predictor normalization back to [0, 1] pixels
         im = (im * 255).round().clip(0, 255).astype(np.uint8)
-        im = np.ascontiguousarray(im[..., ::-1])  # convert RGB to BGR
+        im = np.ascontiguousarray(im)  # the compiled graph expects RGB; it embeds no colour conversion
         outputs = self._infer(im)
         if self.tail is None:
             return outputs
