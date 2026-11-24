@@ -13,6 +13,7 @@ from ultralytics.utils import LOGGER, YAML
 from ultralytics.utils.checks import check_version
 
 AXERA_CHIPS = frozenset({"AX650", "AX8860"})
+AXERA_NPU_MODES = {"AX650": "NPU3", "AX8860": "NPU4"}  # multi-core default per chip
 
 
 def _calibration_images(dataset: Any) -> list[Path]:
@@ -52,8 +53,9 @@ def _graph_output_names(onnx_file: Path) -> list[str]:
 def _split_head(onnx_file: Path, output_dir: Path, head: str) -> Path | None:
     """Split the graph at the head convolutions so the decode runs in FP32 ``tail.onnx``.
 
-    INT8 activations cannot hold both box pixels (~0-640) and class scores (~0-1) in one scale, so the quantized body
-    stops at the per-level head convs and ``tail.onnx`` keeps the box decode for the host. Mirrors the RKNN INT8 split.
+    Fixed-point activations cannot hold both box pixels (~0-640) and class scores (~0-1) in one scale, so the quantized
+    body stops at the per-level head convs and ``tail.onnx`` keeps the box decode for the host. Applies to INT8 (``8``)
+    and INT8-weight builds (``"w8a16"``); pure 16-bit float graphs keep the whole graph.
     """
     import onnx
 
@@ -112,6 +114,7 @@ def _build_config(
         "output_name": "compiled.axmodel",
         "model_type": "ONNX",
         "target_hardware": target,
+        "npu_mode": AXERA_NPU_MODES[target],
         "quant": {
             "input_configs": [
                 {
@@ -236,7 +239,7 @@ def onnx2axera(
     calib_zip = build_dir / "calib.zip"
     calibration_size = _stage_calibration(images, calib_dir, calib_zip)
 
-    body = _split_head(onnx_file, build_dir, head) if (quantize == 8 and head) else None
+    body = _split_head(onnx_file, build_dir, head) if (quantize in {8, "w8a16"} and head) else None
     compiled_onnx = body or onnx_file
     output_names = _graph_output_names(compiled_onnx)
 
@@ -257,6 +260,7 @@ def onnx2axera(
             "inputs": [{"name": "images", "dtype": "uint8", "layout": "NHWC", "range": [0, 255]}],
             "outputs": [{"name": n, "dtype": "float32", "order": i} for i, n in enumerate(output_names)],
             "quantize": quantize,
+            "npu_mode": context.get("npu_mode_str", ""),
             "calibration": {"format": "Image", "size": calibration_size},
             "build_context": context.get("code", ""),
         }
